@@ -58,13 +58,13 @@ module "s3_bucket" {
 
   ##################################################
   ##########Security bugs #################
-    server_side_encryption_configuration = {
-      rule = {
-        apply_server_side_encryption_by_default = {
-        sse_algorithm = "AES256"
-        }
-    } 
-   }
+  #   server_side_encryption_configuration = {
+  #     rule = {
+  #       apply_server_side_encryption_by_default = {
+  #       sse_algorithm = "AES256"
+  #       }
+  #   } 
+  #  }
     block_public_policy = true
      block_public_acls = true
      restrict_public_buckets = true
