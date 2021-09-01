@@ -1,0 +1,35 @@
+# This is a basic workflow to help you get started with Actions
+
+name: infracost
+
+# Controls when the workflow will run
+on:
+  # Triggers the workflow on push or pull request events but only for the main branch
+  push:
+    branches: [ main ]
+ 
+  pull_request:
+    branches: [ main ]
+
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  infracost:
+    runs-on: ubuntu-latest
+    name: Show infracost diff
+    steps:
+    - name: Check out repository
+      uses: actions/checkout@v2
+    - name: Run infracost diff
+      id: infracost
+      uses: infracost/infracost-gh-action@master # Use a specific version instead of master if locking is preferred
+      env:
+        INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
+        GITHUB_TOKEN: ${{ secrets.XGITHUB_TOKEN }}
+      with:
+        path: plan.json
+        post_condition: '{"always": true}'
+    - name: get total cost
+      run: echo ${{ steps.infracost.outputs.total_monthly_cost }} && echo ${{ steps.infracost.outputs.past_total_monthly_cost }}

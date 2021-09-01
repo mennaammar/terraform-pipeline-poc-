@@ -1,0 +1,276 @@
+# This is a basic workflow to help you get started with Actions
+
+name: CI
+
+# Controls when the workflow will run
+on:
+  # Triggers the workflow on push or pull request events but only for the main branch
+  push:
+    branches: [ main ]
+ 
+  pull_request:
+    branches: [ main ]
+ 
+
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  # This workflow contains a single job called "build"
+  Tranform_Setup:
+    # The type of runner that the job will run on
+    runs-on: ubuntu-latest
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - name: Checkout Repository
+        uses: actions/checkout@v2     
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_version: 1.0.4
+      # reformat terraform code. 
+      - name: Terraform Fmt
+        id: fmt
+        run: terraform fmt 
+        continue-on-error: false     
+  Validate_Code_Quality:
+    runs-on: ubuntu-latest
+    needs: Tranform_Setup
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v2 
+        # set a AWS credentials for terraform to work.
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{secrets.AWS_ACCESS_KEY}}
+          aws-secret-access-key: ${{secrets.AWS_SECRET_KEY}}
+          aws-region: eu-west-1    
+        # initializes terraform to download terraform provider, brings the github modules,etc..
+      - name: Terraform Init
+        id: init
+        run: terraform init
+        continue-on-error: false
+        # validate the syntax of the terraform code.
+      - name: Terraform Validate
+        id: validate
+        run: terraform validate -no-color
+        continue-on-error: false
+        # make sure the terraform provider (AWS) code is correct. using correct aws instance type for example.
+      - name: Terraform Tflint
+        id: tflint-install
+        run: curl -s https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
+        continue-on-error: false
+      - name: Run Terraform Tflint 
+        id: Tflint-run
+        run: tflint --init  && tflint --module
+        continue-on-error: false
+      - name: Microsoft Teams Notification
+        uses: skitionek/notify-microsoft-teams@master
+        if: failure()
+        with:
+          webhook_url: ${{secrets.MS_TEAMS_WEBHOOK_URI}}
+         # needs: ${{ toJson(needs) }}
+          job: ${{ toJson(job) }}
+          overwrite: '{"title": "Issues Found in Code Quality Validation"}'
+         # steps: ${{ toJson(steps) }}  
+        continue-on-error: false
+  tfsec_Security_Validation:
+    runs-on: ubuntu-latest
+    needs: ['Tranform_Setup','Validate_Code_Quality']
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v2 
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{secrets.AWS_ACCESS_KEY}}
+          aws-secret-access-key: ${{secrets.AWS_SECRET_KEY}}
+          aws-region: eu-west-1    
+      - name: Terraform Init
+        id: init
+        run: terraform init
+        continue-on-error: false
+        # find security issues in terraform code.
+      - name: Run-tfsec
+        id: tfsecrun
+        uses: tfsec/tfsec-sarif-action@9a83b5c3524f825c020e356335855741fd02745f
+        with:
+          working_directory: .
+          sarif_file: tfsec.sarif 
+        # upload the findings to security tab in github
+      - name: Read SARIF file
+        run: cat tfsec.sarif
+      - name: Upload SARIF file
+        uses: github/codeql-action/upload-sarif@v1
+        with:
+          # Path to SARIF file relative to the root of the repository
+          sarif_file: tfsec.sarif
+      - name: Check tfsec return codes
+        if: success() 
+        run: |
+            tfsec_return="${{steps.tfsecrun.outputs.tfsec-return-code }}"
+            if [[ "$tfsec_return" -eq 1 ]]; then
+             echo "tfsec correctly returned failure ${tfsec_return}"
+              exit 1
+             else
+             echo "tfsec returned ${tfsec_return}, expected '1'. Failing..."
+              exit 0
+             fi
+      - name: Microsoft Teams Notification
+        uses: skitionek/notify-microsoft-teams@master
+        if: failure()
+        with:
+          webhook_url: ${{secrets.MS_TEAMS_WEBHOOK_URI}}
+         # needs: ${{ toJson(needs) }}
+          job: ${{ toJson(job) }}
+          overwrite: '{"title": "Vulnerabilities Found by tfsec"}'
+         # steps: ${{ toJson(steps) }}  
+        continue-on-error: false
+  OPA_Security_Validation:  
+    runs-on: ubuntu-latest
+    needs: ['Tranform_Setup','Validate_Code_Quality']
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v2 
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{secrets.AWS_ACCESS_KEY}}
+          aws-secret-access-key: ${{secrets.AWS_SECRET_KEY}}
+          aws-region: eu-west-1    
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_version: 1.0.4
+          # install OPA 
+      - name: OPA Install
+        id: install 
+        run: curl -L -o opa https://openpolicyagent.org/downloads/v0.31.0/opa_linux_amd64_static && chmod 755 opa && sudo mv opa /usr/bin
+        continue-on-error: false
+      - name: Terraform Init
+        id: init 
+        run: terraform init
+        continue-on-error: false
+        # generate the terraform plan for OPA to validate it.
+      - name: Terraform Plan
+        id: plan
+        run: terraform plan -out opa-plan1  
+        continue-on-error: false
+      - name: Show Plan
+        id: show
+        run: terraform show -json opa-plan1 | sed "1d"  > opa-plan1.json  && cat opa-plan1.json
+        continue-on-error: false
+        # test the OPA rules in .rego files againt the terrform plan.       
+      - name: OPA Test
+        id: opatest
+        run:  opa eval  --format pretty  -d opa-policies/aws/ --input opa-plan1.json "data.terraform.deny"  
+        continue-on-error: false
+        # issues error and stop the job if error occured during OPA check.
+      - name: Check opa return codes
+        if: success() 
+        run: |
+            opa_return=$(opa eval  --format pretty  -d opa-policies/aws/ --input opa-plan1.json "count(data.terraform.deny)")
+             exit $opa_return
+        continue-on-error: false
+      - name: Microsoft Teams Notification
+        uses: skitionek/notify-microsoft-teams@master
+        if: failure()
+        with:
+          webhook_url: ${{secrets.MS_TEAMS_WEBHOOK_URI}}
+         # needs: ${{ toJson(needs) }}
+          job: ${{ toJson(job) }}
+          overwrite: '{"title": "OPA evaluation failed"}'
+         # steps: ${{ toJson(steps) }}  
+        continue-on-error: false
+  Terraform_Cost_Estimate:
+    runs-on: ubuntu-latest
+    needs: ['Tranform_Setup','Validate_Code_Quality','tfsec_Security_Validation','OPA_Security_Validation']
+    steps:   
+      - name: Check out repository
+        uses: actions/checkout@v2
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{secrets.AWS_ACCESS_KEY}}
+          aws-secret-access-key: ${{secrets.AWS_SECRET_KEY}}
+          aws-region: eu-west-1    
+      - name: Terraform Init
+        id: init 
+        run: terraform init
+        continue-on-error: false
+      - name: Terraform Plan
+        id: plan
+        run: terraform plan -out plan.tfplan
+        continue-on-error: false
+      - name: Show Plan
+        id: show
+        run: terraform show -json plan.tfplan  > plan.json   && cat plan.json
+        continue-on-error: false
+      - name: Run infracost diff
+        id: infracost
+        uses: infracost/infracost-gh-action@master # Use a specific version instead of master if locking is preferred
+        env:
+          INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.XGITHUB_TOKEN }}
+        with:
+          path: plan.json
+          post_condition: '{"always": true}'
+      - name: get total cost
+        run: echo ${{ steps.infracost.outputs.total_monthly_cost }} && echo ${{ steps.infracost.outputs.past_total_monthly_cost }}
+  Terraform_Apply:
+    runs-on: ubuntu-latest
+    needs: ['Tranform_Setup','Validate_Code_Quality','tfsec_Security_Validation','OPA_Security_Validation','Terraform_Cost_Estimate']
+    steps:    
+      - name: Checkout Repository
+        uses: actions/checkout@v2 
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{secrets.AWS_ACCESS_KEY}}
+          aws-secret-access-key: ${{secrets.AWS_SECRET_KEY}}
+          aws-region: eu-west-1    
+      - name: Terraform Init
+        id: init
+        run: terraform init
+        continue-on-error: false
+      # - name: Terraform Plan
+      #   id: plan
+      #   run: terraform plan 
+      #   continue-on-error: false
+        # apply terraform plan. 
+      - name: Terraform apply
+        id: Apply
+        run: terraform apply -auto-approve
+        continue-on-error: false
+      - name: Microsoft Teams Notification
+        uses: skitionek/notify-microsoft-teams@master
+        if: failure()
+        with:
+          webhook_url: ${{secrets.MS_TEAMS_WEBHOOK_URI}}
+         # needs: ${{ toJson(needs) }}
+          job: ${{ toJson(job) }}
+          overwrite: '{"title": "Issues occured during Applying Terraform"}'
+         # steps: ${{ toJson(steps) }}  
+        continue-on-error: false
+
+        # send notification for the workflow run.    
+  Send_notification:
+        runs-on: ubuntu-latest
+        if: success()
+        needs: ['Tranform_Setup','Validate_Code_Quality','tfsec_Security_Validation','OPA_Security_Validation','Terraform_Cost_Estimate','Terraform_Apply']
+        steps:
+          - uses: actions/checkout@master
+          - name: Microsoft Teams Notification
+            uses: skitionek/notify-microsoft-teams@master
+            if: success()
+            with:
+              webhook_url: ${{secrets.MS_TEAMS_WEBHOOK_URI}}
+              needs: ${{ toJson(needs) }}
+              job: ${{ toJson(job) }}
+              steps: ${{ toJson(steps) }}      
+
+    
+
