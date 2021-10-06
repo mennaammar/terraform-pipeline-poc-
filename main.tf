@@ -70,7 +70,6 @@ module "s3_bucket" {
      restrict_public_buckets = true
      ignore_public_acls = true
      
-   
   
    logging = {
 		target_bucket = "bucket-logging-maf-us-east" #logging-bucketmaf
